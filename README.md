@@ -1,0 +1,2 @@
+# InfiniteTalk_MultiTalk_Wan2.1
+InfiniteTalk_MultiTalk_Wan2.1
