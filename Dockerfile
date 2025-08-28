@@ -31,7 +31,14 @@ RUN pip install --no-cache-dir \
     https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 
 # Cài đặt SageAttention với fallback
-RUN pip install --no-cache-dir sageattention || echo "⚠️ SageAttention not available for this configuration"
+# Cài đặt dependencies trước
+RUN pip install --no-cache-dir ninja setuptools wheel
+
+# Clone và cài đặt từ source
+RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
+    cd /tmp/sageattention && \
+    pip install --no-cache-dir . && \
+    rm -rf /tmp/sageattention || echo "⚠️ SageAttention compilation failed"
 
 # Core ML/AI packages compatible với PyTorch 2.7.1
 RUN pip install --no-cache-dir \
@@ -195,7 +202,7 @@ RUN echo "=== FINAL PACKAGE VERIFICATION ===" && \
     python -c "import runpod, minio; print('✅ RunPod/MinIO OK')" && \
     python -c "import xformers; print(f'✅ XFormers OK - {xformers.__version__}')" || echo "⚠️ XFormers not available" && \
     python -c "import flash_attn; print('✅ FlashAttention OK')" || echo "⚠️ FlashAttention not available" && \
-    python -c "import sys; sys.path.insert(0, '/app/ComfyUI'); import nodes; print('✅ ComfyUI import OK')" || echo "⚠️ ComfyUI import failed"
+    echo "⚠️ ComfyUI verification skipped (requires GPU runtime)"
 
 # Optimized health check
 HEALTHCHECK --interval=30s --timeout=20s --start-period=300s --retries=3 \
@@ -207,5 +214,6 @@ EXPOSE 8000
 
 # Run với optimized memory
 CMD ["python", "-u", "/app/wan21_handler.py"]
+
 
 
