@@ -21,11 +21,14 @@ RUN apt-get update && apt-get install -y \
 # Verify PyTorch từ base image
 RUN python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')"
 
-# Install XFormers compatible với PyTorch 2.7.1 + CUDA 12.6
+# Install XFormers và FlashAttention tương thích với PyTorch 2.7.1 + CUDA 12.6
+RUN pip install --no-cache-dir -U \
+    torch==2.7.1 torchvision torchaudio xformers \
+    --index-url https://download.pytorch.org/whl/cu126
+
+# Install FlashAttention từ wheel được build sẵn cho PyTorch 2.7
 RUN pip install --no-cache-dir \
-    xformers==0.0.29.post3 \
-    triton==3.1.0 \
-    flash-attn --no-build-isolation || echo "⚠️ Flash-attention installation failed, continuing"
+    https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 
 # Cài đặt SageAttention với fallback
 RUN pip install --no-cache-dir sageattention || echo "⚠️ SageAttention not available for this configuration"
@@ -41,7 +44,8 @@ RUN pip install --no-cache-dir \
     safetensors==0.4.5 \
     tqdm==4.66.6 \
     psutil==6.0.0 \
-    kornia==0.7.3
+    kornia==0.7.3 \
+    triton==3.1.0
 
 # Computer Vision & Media packages
 RUN pip install --no-cache-dir \
@@ -204,3 +208,4 @@ EXPOSE 8000
 
 # Run với optimized memory
 CMD ["python", "-u", "/app/wan21_handler.py"]
+
