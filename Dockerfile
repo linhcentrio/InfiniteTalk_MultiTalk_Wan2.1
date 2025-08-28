@@ -23,7 +23,7 @@ RUN python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUD
 
 # Install XFormers compatible với PyTorch 2.7.1 + CUDA 12.6
 RUN pip install --no-cache-dir \
-    xformers==0.0.29.dev796 \
+    xformers==0.0.29.post3 \
     triton==3.1.0 \
     flash-attn --no-build-isolation || echo "⚠️ Flash-attention installation failed, continuing"
 
@@ -50,7 +50,7 @@ RUN pip install --no-cache-dir \
     albumentations==1.4.15 \
     onnx==1.16.2 \
     opencv-python==4.10.0.84 \
-    color-matcher==0.7.0 \
+    color-matcher==0.6.0 \
     segment_anything==1.0 \
     ultralytics==8.2.103 \
     onnxruntime==1.19.2 \
