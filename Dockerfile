@@ -44,8 +44,7 @@ RUN pip install --no-cache-dir \
     safetensors==0.4.5 \
     tqdm==4.66.6 \
     psutil==6.0.0 \
-    kornia==0.7.3 \
-    triton==3.1.0
+    kornia==0.7.3
 
 # Computer Vision & Media packages
 RUN pip install --no-cache-dir \
@@ -208,4 +207,5 @@ EXPOSE 8000
 
 # Run với optimized memory
 CMD ["python", "-u", "/app/wan21_handler.py"]
+
 
