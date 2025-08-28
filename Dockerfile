@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir \
 
 # Cài đặt SageAttention với fallback
 # Cài đặt dependencies trước
-RUN pip install --no-cache-dir ninja setuptools wheel
+RUN pip install --no-cache-dir packaging ninja setuptools wheel
 
 # Clone và cài đặt từ source
 RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && \
@@ -214,6 +214,7 @@ EXPOSE 8000
 
 # Run với optimized memory
 CMD ["python", "-u", "/app/wan21_handler.py"]
+
 
 
 
