@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-WAN2.1 InfiniteTalk/MultiTalk - Memory Optimized Handler v3.0
+WAN2.1 Handler v3.1 - Fixed Context Manager Issue
+Corrected memory_safe_execution implementation
 """
 
 import runpod
@@ -20,104 +21,73 @@ import traceback
 import subprocess
 import imageio
 import numpy as np
-import asyncio
-import threading
 from pathlib import Path
 from minio import Minio
 from urllib.parse import quote
 import logging
 from functools import wraps
+from contextlib import contextmanager
 from typing import Optional, Tuple, List, Dict, Any
 
-# CRITICAL: Set memory environment variables trước khi import torch operations
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.8'
+# CRITICAL: Set memory environment variables
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.9'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['TORCH_BACKENDS_CUDNN_BENCHMARK'] = '1'
 
-# Performance monitoring imports
-try:
-    import psutil
-    import gpustat
-    PERFORMANCE_MONITORING_AVAILABLE = True
-except ImportError:
-    PERFORMANCE_MONITORING_AVAILABLE = False
-    print("⚠️ Performance monitoring packages not available")
-
-# Configure enhanced logging với memory tracking
+# Enhanced logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - [MEM:%(process)d] - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('/app/logs/wan21_memory.log') if os.path.exists('/app/logs') else logging.NullHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - [MEM:%(process)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Add ComfyUI paths
 sys.path.insert(0, '/app/ComfyUI')
 
-# CRITICAL: Setup PyTorch memory management trước khi import models
 def setup_memory_management():
     """Setup aggressive memory management"""
     try:
         if torch.cuda.is_available():
-            # Set memory fraction để reserve memory cho processing
-            torch.cuda.set_per_process_memory_fraction(0.95)  # Use max 95% GPU memory
-            
-            # Enable memory optimizations
+            torch.cuda.set_per_process_memory_fraction(0.95)
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-            torch.set_float32_matmul_precision('medium')  # Balance performance vs precision
-            
-            # Clear any existing cache
+            torch.set_float32_matmul_precision('medium')
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
             
             total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            logger.info(f"💾 GPU Memory Management Setup: {total_memory:.1f}GB total, 85% available for models")
+            logger.info(f"💾 GPU Memory Management Setup: {total_memory:.1f}GB total, 85% available")
             
     except Exception as e:
-        logger.warning(f"⚠️ Memory management setup partially failed: {e}")
+        logger.warning(f"⚠️ Memory management setup failed: {e}")
 
 setup_memory_management()
 
-# Enhanced attention mechanism detection với memory considerations
+# Enhanced attention detection
 def detect_available_attention_mechanisms():
-    """Detect available attention mechanisms ưu tiên memory efficiency"""
-    mechanisms = {
-        'flash_attn': False,
-        'xformers': False, 
-        'sageattention': False,
-        'pytorch': True  # Always available fallback
-    }
+    mechanisms = {'flash_attn': False, 'xformers': False, 'sageattention': False, 'pytorch': True}
     
-    # Test FlashAttention với memory safety
     try:
         import flash_attn
         version = getattr(flash_attn, '__version__', 'unknown')
         if '2.7' <= version <= '2.8':
             mechanisms['flash_attn'] = True
-            logger.info(f"✅ FlashAttention detected - v{version} (memory efficient)")
+            logger.info(f"✅ FlashAttention v{version} - memory efficient")
         else:
-            logger.warning(f"⚠️ FlashAttention v{version} - may have memory issues")
+            logger.warning(f"⚠️ FlashAttention v{version} - may have issues")
     except ImportError:
         logger.info("⚠️ FlashAttention not available")
     
-    # Test XFormers
     try:
         import xformers
         mechanisms['xformers'] = True
-        logger.info(f"✅ XFormers detected - v{xformers.__version__} (good fallback)")
+        logger.info(f"✅ XFormers v{xformers.__version__} - good fallback")
     except ImportError:
         logger.info("⚠️ XFormers not available")
     
-    # Test SageAttention (thường memory hungry)
     try:
         import sageattention
         mechanisms['sageattention'] = True
-        logger.info("✅ SageAttention detected (may use more memory)")
+        logger.info("✅ SageAttention detected (memory hungry)")
     except ImportError:
         logger.info("⚠️ SageAttention not available")
     
@@ -125,11 +95,9 @@ def detect_available_attention_mechanisms():
 
 ATTENTION_MECHANISMS = detect_available_attention_mechanisms()
 
-# Import ComfyUI components với memory management
+# Import ComfyUI components
 try:
-    from nodes import (
-        CLIPLoader, CLIPTextEncode, LoadImage, CLIPVisionLoader, ImageScale
-    )
+    from nodes import (CLIPLoader, CLIPTextEncode, LoadImage, CLIPVisionLoader, ImageScale)
     from custom_nodes.ComfyUI_WanVideoWrapper.nodes_model_loading import (
         WanVideoModelLoader, WanVideoVAELoader, WanVideoLoraSelect, WanVideoBlockSwap
     )
@@ -178,58 +146,41 @@ MODEL_CONFIGS = {
     "speed_lora": os.getenv("SPEED_LORA_PATH", "/app/ComfyUI/models/loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors")
 }
 
-# Memory management configuration
 MEMORY_CONFIG = {
-    "max_gpu_usage_percent": 95,  # Max 95% GPU memory
-    "emergency_cleanup_threshold": 98,  # Emergency cleanup at 98%
-    "min_free_memory_gb": 6.0,  # Minimum free memory required
+    "max_gpu_usage_percent": 85,
+    "emergency_cleanup_threshold": 90,
+    "min_free_memory_gb": 6.0,
     "enable_aggressive_cleanup": True,
     "memory_monitoring": True
 }
 
-# CRITICAL: Emergency memory cleanup function
 def emergency_memory_cleanup(force_aggressive=False):
     """Aggressive memory cleanup để prevent OOM"""
     try:
-        # Clear Python garbage
         collected = gc.collect()
         
         if torch.cuda.is_available():
-            # Get current memory stats
             allocated_before = torch.cuda.memory_allocated() / 1024**3
             cached_before = torch.cuda.memory_reserved() / 1024**3
             
-            # Clear CUDA cache
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             
             if force_aggressive:
-                # More aggressive cleanup
                 torch.cuda.synchronize()
                 torch.cuda.reset_peak_memory_stats()
-                # Clear all cached allocations
-                torch.cuda.set_per_process_memory_fraction(0.9)  # Temporarily reduce
+                torch.cuda.set_per_process_memory_fraction(0.9)
                 torch.cuda.empty_cache()
-                torch.cuda.set_per_process_memory_fraction(0.95)  # Restore
+                torch.cuda.set_per_process_memory_fraction(0.95)
             
             allocated_after = torch.cuda.memory_allocated() / 1024**3
             cached_after = torch.cuda.memory_reserved() / 1024**3
-            
             freed_memory = (allocated_before - allocated_after) + (cached_before - cached_after)
             
             logger.info(f"🧹 Memory cleanup: {allocated_after:.1f}GB allocated, {cached_after:.1f}GB cached")
             if freed_memory > 0.1:
                 logger.info(f"✅ Freed {freed_memory:.1f}GB memory")
-        
-        # Clear system variables if needed
-        if force_aggressive:
-            for name in list(globals().keys()):
-                if name.startswith('_temp_') or name.startswith('cached_'):
-                    try:
-                        del globals()[name]
-                    except:
-                        pass
-                        
+                
     except Exception as e:
         logger.warning(f"⚠️ Memory cleanup error: {e}")
 
@@ -256,83 +207,62 @@ def get_memory_stats():
         logger.warning(f"⚠️ Failed to get memory stats: {e}")
         return {}
 
+# FIXED: Context manager implementation instead of decorator  
+@contextmanager
 def memory_safe_execution(stage_name="Unknown"):
-    """Decorator để ensure memory safety cho functions"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Pre-execution memory check và cleanup
-            mem_stats = get_memory_stats()
-            if mem_stats.get("usage_percent", 0) > MEMORY_CONFIG["emergency_cleanup_threshold"]:
-                logger.warning(f"🚨 High memory usage before {stage_name}: {mem_stats.get('usage_percent', 0):.1f}%")
-                emergency_memory_cleanup(force_aggressive=True)
-            
-            start_time = time.time()
-            initial_memory = mem_stats.get("allocated_gb", 0)
-            
-            try:
-                # Check if enough free memory
-                if mem_stats.get("free_gb", 0) < MEMORY_CONFIG["min_free_memory_gb"]:
-                    logger.warning(f"⚠️ Low free memory for {stage_name}: {mem_stats.get('free_gb', 0):.1f}GB")
-                    emergency_memory_cleanup(force_aggressive=True)
-                
-                # Execute function
-                result = func(*args, **kwargs)
-                
-                # Post-execution cleanup
-                emergency_memory_cleanup()
-                
-                # Log performance
-                duration = time.time() - start_time
-                final_stats = get_memory_stats()
-                memory_delta = final_stats.get("allocated_gb", 0) - initial_memory
-                
-                logger.info(f"✅ {stage_name}: {duration:.1f}s, Memory: {final_stats.get('allocated_gb', 0):.1f}GB ({memory_delta:+.1f}GB)")
-                
-                return result
-                
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.error(f"🚨 OOM Error in {stage_name}: {e}")
-                    emergency_memory_cleanup(force_aggressive=True)
-                    
-                    # Try to recover by reducing parameters
-                    if "kwargs" in locals() and isinstance(kwargs, dict):
-                        # Force memory-saving parameters
-                        kwargs["use_block_swap"] = True
-                        kwargs["blocks_to_swap"] = min(30, kwargs.get("blocks_to_swap", 20) + 5)
-                        kwargs["use_vae_tiling"] = True
-                        logger.info(f"🔧 Retrying {stage_name} với memory-safe parameters")
-                        
-                        # Retry với reduced parameters
-                        try:
-                            emergency_memory_cleanup(force_aggressive=True)
-                            return func(*args, **kwargs)
-                        except:
-                            logger.error(f"❌ {stage_name} failed even với memory-safe retry")
-                            raise
-                    else:
-                        raise
-                else:
-                    raise
-                    
-        return wrapper
-    return decorator
+    """Context manager để ensure memory safety"""
+    # Pre-execution memory check
+    mem_stats = get_memory_stats()
+    if mem_stats.get("usage_percent", 0) > MEMORY_CONFIG["emergency_cleanup_threshold"]:
+        logger.warning(f"🚨 High memory usage before {stage_name}: {mem_stats.get('usage_percent', 0):.1f}%")
+        emergency_memory_cleanup(force_aggressive=True)
+    
+    start_time = time.time()
+    initial_memory = mem_stats.get("allocated_gb", 0)
+    
+    try:
+        # Check available memory
+        if mem_stats.get("free_gb", 0) < MEMORY_CONFIG["min_free_memory_gb"]:
+            logger.warning(f"⚠️ Low free memory for {stage_name}: {mem_stats.get('free_gb', 0):.1f}GB")
+            emergency_memory_cleanup(force_aggressive=True)
+        
+        yield  # Execute the code block
+        
+        # Post-execution cleanup
+        emergency_memory_cleanup()
+        
+        # Log performance
+        duration = time.time() - start_time
+        final_stats = get_memory_stats()
+        memory_delta = final_stats.get("allocated_gb", 0) - initial_memory
+        
+        logger.info(f"✅ {stage_name}: {duration:.1f}s, Memory: {final_stats.get('allocated_gb', 0):.1f}GB ({memory_delta:+.1f}GB)")
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            logger.error(f"🚨 OOM Error in {stage_name}: {e}")
+            emergency_memory_cleanup(force_aggressive=True)
+            raise
+        else:
+            raise
+    except Exception as e:
+        logger.error(f"❌ Error in {stage_name}: {e}")
+        raise
+    finally:
+        emergency_memory_cleanup()
 
 def get_optimal_attention_mode(prefer_memory_efficient=True) -> str:
-    """Determine optimal attention mode ưu tiên memory efficiency"""
+    """Determine optimal attention mode"""
     if prefer_memory_efficient:
-        # Ưu tiên memory efficiency
         if ATTENTION_MECHANISMS['flash_attn']:
-            return "flash_attn"  # Most memory efficient
+            return "flash_attn"
         elif ATTENTION_MECHANISMS['xformers']:
-            return "xformers"   # Good balance
+            return "xformers"
         elif ATTENTION_MECHANISMS['sageattention']:
-            return "sageattn"   # Fastest but more memory
+            return "sageattn"
         else:
-            return "pytorch"    # Fallback
+            return "pytorch"
     else:
-        # Ưu tiên performance
         if ATTENTION_MECHANISMS['sageattention']:
             return "sageattn"
         elif ATTENTION_MECHANISMS['flash_attn']:
@@ -346,71 +276,60 @@ def auto_optimize_for_memory(job_input: dict) -> dict:
     """Auto-optimize parameters để prevent memory issues"""
     logger.info("🔧 Auto-optimizing parameters for memory efficiency...")
     
-    # Get current memory state
     mem_stats = get_memory_stats()
-    available_memory = mem_stats.get("free_gb", 30)  # Default assume 30GB if can't detect
+    available_memory = mem_stats.get("free_gb", 30)
     
-    # Calculate complexity factors
     width = job_input.get("width", 400)
     height = job_input.get("height", 704)
     max_audio_duration = job_input.get("max_audio_duration", 30)
     
     resolution_factor = (width * height) / (400 * 704)
-    duration_factor = max_audio_duration / 20  # 20s baseline
-    
+    duration_factor = max_audio_duration / 20
     complexity_score = resolution_factor * duration_factor
     
-    # CRITICAL: Always enable block swap cho safety
+    # CRITICAL: Always enable block swap
     job_input["use_block_swap"] = True
     
-    # Calculate optimal block swap based on complexity
     if complexity_score > 2.0 or available_memory < 15:
-        job_input["blocks_to_swap"] = 30  # Aggressive swapping
-        logger.info("🔧 High complexity detected - enabling aggressive block swap (30 blocks)")
+        job_input["blocks_to_swap"] = 30
+        logger.info("🔧 High complexity - aggressive block swap (30 blocks)")
     elif complexity_score > 1.5 or available_memory < 20:
-        job_input["blocks_to_swap"] = 25  # Moderate swapping
-        logger.info("🔧 Moderate complexity - enabling block swap (25 blocks)")
+        job_input["blocks_to_swap"] = 25
+        logger.info("🔧 Moderate complexity - block swap (25 blocks)")
     else:
-        job_input["blocks_to_swap"] = 20  # Standard swapping
-        logger.info("🔧 Standard complexity - enabling block swap (20 blocks)")
+        job_input["blocks_to_swap"] = 20
+        logger.info("🔧 Standard complexity - block swap (20 blocks)")
     
-    # Auto-enable VAE tiling cho high resolution
     if width > 450 or height > 800 or available_memory < 12:
         job_input["use_vae_tiling"] = True
-        logger.info("🔧 Auto-enabled VAE tiling for memory efficiency")
+        logger.info("🔧 Auto-enabled VAE tiling")
     
-    # Auto-reduce audio duration if needed
     if max_audio_duration > 25 and available_memory < 15:
         job_input["max_audio_duration"] = 20
-        logger.info("🔧 Auto-reduced audio duration to 20s for memory safety")
+        logger.info("🔧 Auto-reduced audio duration to 20s")
     elif max_audio_duration > 20 and available_memory < 10:
         job_input["max_audio_duration"] = 15
-        logger.info("🔧 Auto-reduced audio duration to 15s for critical memory safety")
+        logger.info("🔧 Auto-reduced audio duration to 15s")
     
-    # Auto-reduce resolution if critical memory situation
     if available_memory < 10:
         new_width = min(width, 320)
         new_height = min(height, 576)
         if new_width != width or new_height != height:
             job_input["width"] = new_width
             job_input["height"] = new_height
-            logger.warning(f"🔧 Critical memory - auto-reduced resolution to {new_width}x{new_height}")
+            logger.warning(f"🔧 Critical memory - reduced resolution to {new_width}x{new_height}")
     
-    # Force memory-efficient attention
     job_input["_force_memory_efficient_attention"] = available_memory < 15
     
-    logger.info(f"📊 Optimization summary: {complexity_score:.1f} complexity, {available_memory:.1f}GB available")
+    logger.info(f"📊 Optimization: {complexity_score:.1f} complexity, {available_memory:.1f}GB available")
     return job_input
 
-@memory_safe_execution("Model Verification")
 def verify_models(mode: str = "multitalk") -> Tuple[bool, List[str]]:
-    """Verify required models với memory safety"""
+    """Verify required models"""
     logger.info(f"🔍 Verifying models for {mode} mode...")
     missing_models = []
-    existing_models = []
     
     base_models = ["wan21_model", "wan21_vae", "text_encoder", "clip_vision", "wav2vec_model"]
-    
     if mode == "multitalk":
         required_models = base_models + ["multitalk_model"]
     else:
@@ -420,19 +339,15 @@ def verify_models(mode: str = "multitalk") -> Tuple[bool, List[str]]:
     for name in required_models:
         path = MODEL_CONFIGS[name]
         if os.path.exists(path):
-            try:
-                file_size_mb = os.path.getsize(path) / (1024 * 1024)
-                existing_models.append(f"{name}: {file_size_mb:.1f}MB")
-                total_size += file_size_mb
-            except Exception as e:
-                missing_models.append(f"{name}: {path} (error reading)")
+            file_size_mb = os.path.getsize(path) / (1024 * 1024)
+            total_size += file_size_mb
         else:
             missing_models.append(f"{name}: {path}")
     
     if missing_models:
         return False, missing_models
     else:
-        logger.info(f"✅ All {len(existing_models)} models verified! Total: {total_size:.1f}MB")
+        logger.info(f"✅ All {len(required_models)} models verified! Total: {total_size:.1f}MB")
         return True, []
 
 def ensure_odd_frames(frames: int) -> int:
@@ -447,10 +362,9 @@ def image_width_height(image_tensor):
         raise ValueError(f"Unsupported image shape: {image_tensor.shape}")
     return width, height
 
-@memory_safe_execution("Audio Processing")
 def load_and_process_audio(audio_paths: List[str], max_duration: int = None):
     """Load và process audio với memory optimization"""
-    logger.info(f"🎵 Loading {len(audio_paths)} audio files với memory optimization...")
+    logger.info(f"🎵 Loading {len(audio_paths)} audio files...")
     load_audio = LoadAudio()
     loaded_audios = []
     
@@ -460,17 +374,13 @@ def load_and_process_audio(audio_paths: List[str], max_duration: int = None):
                 audio_data = load_audio.load(path)[0]
                 loaded_audios.append(audio_data)
                 logger.info(f"✅ Audio {i+1} loaded: {audio_data['sample_rate']}Hz")
-                
-                # Memory cleanup after each audio load
                 emergency_memory_cleanup()
-                
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load audio {i+1}: {e}")
                 loaded_audios.append(None)
         else:
             loaded_audios.append(None)
     
-    # Process multiple audios
     non_none_audios = [a for a in loaded_audios if a is not None]
     if not non_none_audios:
         raise ValueError("No valid audio files loaded")
@@ -483,7 +393,6 @@ def load_and_process_audio(audio_paths: List[str], max_duration: int = None):
     else:
         combined_audio = non_none_audios[0]
     
-    # Crop if max duration specified
     if max_duration:
         audio_duration = combined_audio["waveform"].shape[-1] / combined_audio["sample_rate"]
         if audio_duration > max_duration:
@@ -493,52 +402,43 @@ def load_and_process_audio(audio_paths: List[str], max_duration: int = None):
     
     return combined_audio, loaded_audios
 
-@memory_safe_execution("Video Saving")
 def save_video_with_audio(frames_tensor, output_path, fps, audio_path=None):
     """Save video với memory-efficient processing"""
     try:
         logger.info(f"🎬 Saving video to: {output_path}")
         
-        # Convert tensor với memory management
         if torch.is_tensor(frames_tensor):
             frames_np = frames_tensor.detach().cpu().float().numpy()
-            del frames_tensor  # Free tensor memory immediately
+            del frames_tensor
             emergency_memory_cleanup()
         else:
             frames_np = np.array(frames_tensor, dtype=np.float32)
         
-        # Handle batch dimension
         if frames_np.ndim == 5 and frames_np.shape[0] == 1:
             frames_np = frames_np[0]
         
-        # Convert to uint8 với proper scaling
         frames_np = np.clip(frames_np * 255.0, 0, 255).astype(np.uint8)
         logger.info(f"📊 Video stats: {frames_np.shape}, {frames_np.dtype}")
         
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
         if audio_path and os.path.exists(audio_path):
-            # Save with audio using optimized settings
             temp_video_path = output_path.replace('.mp4', '_temp.mp4')
             
-            # Save video without audio với memory-efficient writer
-            with imageio.get_writer(temp_video_path, fps=fps, codec='h264', quality=6, macro_block_size=16) as writer:
-                # Process frames in chunks để avoid memory buildup
-                chunk_size = min(50, len(frames_np) // 4)  # Process in chunks
+            with imageio.get_writer(temp_video_path, fps=fps, codec='h264', quality=6) as writer:
+                chunk_size = min(50, len(frames_np) // 4)
                 for i in range(0, len(frames_np), chunk_size):
                     chunk = frames_np[i:i+chunk_size]
                     for frame in chunk:
                         writer.append_data(frame)
-                    # Cleanup after each chunk
                     del chunk
                     emergency_memory_cleanup()
             
-            # Merge with audio
             cmd = [
                 'ffmpeg', '-y', '-loglevel', 'error',
                 '-i', temp_video_path, '-i', audio_path,
-                '-c:v', 'libx264', '-preset', 'ultrafast',  # Fastest encoding
-                '-c:a', 'aac', '-b:a', '96k',  # Compressed audio
+                '-c:v', 'libx264', '-preset', 'ultrafast',
+                '-c:a', 'aac', '-b:a', '96k',
                 '-shortest', output_path
             ]
             
@@ -546,11 +446,10 @@ def save_video_with_audio(frames_tensor, output_path, fps, audio_path=None):
                 subprocess.run(cmd, check=True, capture_output=True, timeout=180)
                 os.remove(temp_video_path)
                 logger.info("✅ Video với audio saved successfully")
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            except Exception as e:
                 logger.warning(f"⚠️ FFmpeg failed: {e}")
                 os.rename(temp_video_path, output_path)
         else:
-            # Save without audio
             with imageio.get_writer(output_path, fps=fps, codec='h264', quality=6) as writer:
                 chunk_size = min(50, len(frames_np) // 4)
                 for i in range(0, len(frames_np), chunk_size):
@@ -560,29 +459,21 @@ def save_video_with_audio(frames_tensor, output_path, fps, audio_path=None):
                     del chunk
                     emergency_memory_cleanup()
         
-        # Final cleanup
         del frames_np
         emergency_memory_cleanup()
-        
         return output_path
         
     except Exception as e:
         logger.error(f"❌ Video saving failed: {e}")
         raise e
 
-@memory_safe_execution("WAN2.1 Memory-Safe Generation")
 def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str], **kwargs) -> str:
-    """
-    MEMORY-OPTIMIZED WAN2.1 video generation
-    Designed để prevent CUDA OOM errors
-    """
+    """Memory-optimized WAN2.1 video generation"""
     try:
         logger.info("🎬 Starting memory-optimized WAN2.1 generation...")
         
-        # Auto-optimize parameters cho memory
         kwargs = auto_optimize_for_memory(kwargs)
         
-        # Extract parameters
         positive_prompt = kwargs.get('positive_prompt', 'The person takes turns talking')
         negative_prompt = kwargs.get('negative_prompt', 'bright tones, overexposed, static, blurred details')
         
@@ -595,14 +486,13 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
         scheduler = kwargs.get('scheduler', 'flowmatch_distill')
         
         mode = kwargs.get('mode', 'multitalk')
-        use_block_swap = kwargs.get('use_block_swap', True)  # Always True now
+        use_block_swap = kwargs.get('use_block_swap', True)
         blocks_to_swap = kwargs.get('blocks_to_swap', 20)
         use_speed_lora = kwargs.get('use_speed_lora', True)
         speed_lora_strength = kwargs.get('speed_lora_strength', 1.0)
         max_audio_duration = kwargs.get('max_audio_duration', None)
         use_vae_tiling = kwargs.get('use_vae_tiling', False)
         
-        # Get memory-efficient attention mode
         prefer_memory_efficient = kwargs.get('_force_memory_efficient_attention', True)
         attention_mode = get_optimal_attention_mode(prefer_memory_efficient)
         
@@ -616,8 +506,7 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
             raise RuntimeError("WanVideoWrapper modules not available")
         
         with torch.inference_mode():
-            # Initialize nodes
-            logger.info("🔧 Initializing nodes với memory management...")
+            logger.info("🔧 Initializing nodes...")
             
             # Core nodes
             clip_loader = CLIPLoader()
@@ -648,7 +537,7 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
             
             logger.info("✅ All nodes initialized")
             
-            # STAGE 1: Text encoding với memory cleanup
+            # STAGE 1: Text encoding
             with memory_safe_execution("Text Encoding"):
                 logger.info("📝 Loading Text Encoder...")
                 clip = clip_loader.load_clip(os.path.basename(MODEL_CONFIGS["text_encoder"]), "wan", "default")[0]
@@ -656,7 +545,6 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                 negative = clip_encode_negative.encode(clip, negative_prompt)[0]
                 text_embeds = wan_text_embed_bridge.process(positive, negative)[0]
                 del clip, positive, negative
-                emergency_memory_cleanup()
             
             # STAGE 2: Image processing
             with memory_safe_execution("Image Processing"):
@@ -671,13 +559,12 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     logger.info(f"Scaling image to {width}x{height}...")
                     loaded_image = image_scaler.upscale(loaded_image, "lanczos", width, height, "disabled")[0]
                 
-                # CLIP Vision processing với memory efficiency
                 clip_vision_output = wan_clip_vision.process(
                     clip_vision=clip_vision,
                     image_1=loaded_image,
                     strength_1=1.0,
                     strength_2=1.0,
-                    force_offload=True,  # Enable offload
+                    force_offload=True,
                     crop="disabled",
                     combine_embeds="average",
                     image_2=None,
@@ -686,9 +573,8 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     ratio=0.5
                 )[0]
                 del clip_vision
-                emergency_memory_cleanup()
             
-            # STAGE 3: Audio processing với memory optimization
+            # STAGE 3: Audio processing
             with memory_safe_execution("Audio Processing"):
                 combined_audio, loaded_audios = load_and_process_audio(audio_paths, max_audio_duration)
                 
@@ -698,12 +584,10 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                 
                 logger.info(f"Audio duration: {audio_duration:.1f}s, Frames: {frames}")
                 
-                # Save combined audio
                 output_audio_path = "/tmp/combined_audio.wav"
                 waveform = combined_audio["waveform"].squeeze(0)
                 torchaudio.save(output_audio_path, waveform, combined_audio["sample_rate"])
                 del waveform
-                emergency_memory_cleanup()
             
             # STAGE 4: Wav2Vec processing
             with memory_safe_execution("Audio Embedding"):
@@ -719,7 +603,6 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     loaded_audios[3] if len(loaded_audios) > 3 else None
                 )
                 del wav2vec_model
-                emergency_memory_cleanup()
             
             # STAGE 5: VAE và image embedding
             with memory_safe_execution("VAE & Image Embedding"):
@@ -731,7 +614,6 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     False, 'mkl', loaded_image, False, clip_vision_output
                 )[0]
                 del loaded_image, clip_vision_output
-                emergency_memory_cleanup()
             
             # STAGE 6: Talk model loading
             with memory_safe_execution("Talk Model Loading"):
@@ -755,18 +637,18 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
             
             block_swap_args = None
             if use_block_swap:
-                logger.info(f"🔄 Setting up aggressive block swap ({blocks_to_swap} blocks)...")
+                logger.info(f"🔄 Setting up block swap ({blocks_to_swap} blocks)...")
                 block_swap_args = block_swapper.setargs(
                     blocks_to_swap=blocks_to_swap,
-                    offload_img_emb=True,   # Offload image embeddings
-                    offload_txt_emb=True,   # Offload text embeddings
+                    offload_img_emb=True,
+                    offload_txt_emb=True,
                     use_non_blocking=True,
                     vace_blocks_to_swap=0,
-                    prefetch_blocks=1,      # Minimal prefetch
+                    prefetch_blocks=1,
                     block_swap_debug=False
                 )[0]
             
-            # STAGE 8: Main model loading với memory safety
+            # STAGE 8: Main model loading
             with memory_safe_execution("WAN2.1 Model Loading"):
                 logger.info(f"🎯 Loading WAN2.1 base model với {attention_mode} attention...")
                 
@@ -791,12 +673,10 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     
                 except Exception as model_error:
                     logger.warning(f"⚠️ {attention_mode} failed: {model_error}")
-                    logger.warning("🔄 Retrying với memory-safe pytorch attention...")
+                    logger.warning("🔄 Retrying với PyTorch attention...")
                     
-                    # Emergency memory cleanup
                     emergency_memory_cleanup(force_aggressive=True)
                     
-                    # Fallback to pytorch attention
                     model = wan_model_loader.loadmodel(
                         model=os.path.basename(MODEL_CONFIGS["wan21_model"]),
                         base_precision="fp16",
@@ -816,28 +696,27 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     logger.info("✅ Model loaded với PyTorch attention fallback")
                 
                 del multitalk_model
-                emergency_memory_cleanup()
             
-            # STAGE 9: Context optimization cho long videos
+            # STAGE 9: Context optimization
             context_options = None
-            if frames > 200:  # Use context optimization for videos > 8s
-                context_frames = min(frames, 200)  # Smaller context for memory
+            if frames > 200:
+                context_frames = min(frames, 200)
                 context_options = wan_context_options.process(
                     context_schedule="uniform_standard",
                     context_frames=context_frames,
-                    context_stride=12,  # Larger stride
-                    context_overlap=6,  # Smaller overlap
+                    context_stride=12,
+                    context_overlap=6,
                     freenoise=True,
                     verbose=False,
-                    image_cond_start_step=3,  # Earlier conditioning
-                    image_cond_window_count=1,  # Fewer windows
+                    image_cond_start_step=3,
+                    image_cond_window_count=1,
                     vae=None,
                     fuse_method="linear",
                     reference_latent=None
                 )[0]
-                logger.info(f"🔧 Memory-optimized context: {context_frames} frames, {context_options}")
+                logger.info(f"🔧 Memory-optimized context: {context_frames} frames")
             
-            # STAGE 10: Video sampling với memory management
+            # STAGE 10: Video sampling
             with memory_safe_execution("Video Sampling"):
                 logger.info("🎬 Sampling video với memory optimization...")
                 
@@ -851,7 +730,7 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     scheduler=scheduler,
                     riflex_freq_index=0,
                     text_embeds=text_embeds,
-                    force_offload=True,  # Force offload for memory
+                    force_offload=True,
                     samples=None,
                     feta_args=None,
                     denoise_strength=1.0,
@@ -876,9 +755,8 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                 )[0]
                 
                 del model, text_embeds, wav2vec_embeds
-                emergency_memory_cleanup()
             
-            # STAGE 11: VAE decoding với tiling
+            # STAGE 11: VAE decoding
             with memory_safe_execution("VAE Decoding"):
                 logger.info("🎨 Decoding latents với memory-efficient VAE tiling...")
                 
@@ -886,7 +764,7 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                     vae=vae,
                     samples=sampled,
                     enable_vae_tiling=use_vae_tiling,
-                    tile_x=256 if use_vae_tiling else 512,  # Smaller tiles
+                    tile_x=256 if use_vae_tiling else 512,
                     tile_y=256 if use_vae_tiling else 512,
                     tile_stride_x=128 if use_vae_tiling else 256,
                     tile_stride_y=128 if use_vae_tiling else 256,
@@ -894,13 +772,11 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
                 )[0]
                 
                 del vae, sampled, image_embeds
-                emergency_memory_cleanup()
             
             # STAGE 12: Save video
             output_path = f"/app/ComfyUI/output/wan21_{mode}_{uuid.uuid4().hex[:8]}.mp4"
             final_output_path = save_video_with_audio(decoded, output_path, fps, output_audio_path)
             
-            # Final cleanup
             del decoded
             emergency_memory_cleanup()
             
@@ -916,7 +792,7 @@ def generate_video_wan21_memory_optimized(image_path: str, audio_paths: List[str
         emergency_memory_cleanup(force_aggressive=True)
 
 def upload_to_minio(local_path: str, object_name: str) -> str:
-    """Upload với retry logic và memory safety"""
+    """Upload với retry logic"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -952,7 +828,6 @@ def validate_input_parameters(job_input: dict) -> Tuple[bool, str]:
             if param not in job_input or not job_input[param]:
                 return False, f"Missing required parameter: {param}"
         
-        # Validate image URL
         try:
             response = requests.head(job_input["image_url"], timeout=15)
             if response.status_code != 200:
@@ -960,7 +835,6 @@ def validate_input_parameters(job_input: dict) -> Tuple[bool, str]:
         except Exception as e:
             return False, f"Image URL validation failed: {str(e)}"
         
-        # Validate audio URLs
         audio_urls = job_input["audio_urls"]
         if not isinstance(audio_urls, list) or len(audio_urls) == 0:
             return False, "audio_urls must be a non-empty list"
@@ -968,19 +842,17 @@ def validate_input_parameters(job_input: dict) -> Tuple[bool, str]:
         if len(audio_urls) > 4:
             return False, "Maximum 4 audio files supported"
         
-        # Validate dimensions
         width = job_input.get("width", 400)
         height = job_input.get("height", 704)
-        if not (256 <= width <= 800 and 256 <= height <= 800):  # Reasonable limits cho memory
+        if not (256 <= width <= 800 and 256 <= height <= 800):
             return False, "Width and height must be between 256 and 800 for memory safety"
         
-        # Validate other parameters
         mode = job_input.get("mode", "multitalk")
         if mode not in ["multitalk", "infinitetalk"]:
             return False, "Mode must be 'multitalk' or 'infinitetalk'"
         
         steps = job_input.get("steps", 4)
-        if not (1 <= steps <= 15):  # Reduced max steps
+        if not (1 <= steps <= 15):
             return False, "Steps must be between 1 and 15"
         
         fps = job_input.get("fps", 25)
@@ -992,25 +864,21 @@ def validate_input_parameters(job_input: dict) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Parameter validation error: {str(e)}"
 
-@memory_safe_execution("Complete Job Processing")
 def handler(job):
-    """Enhanced RunPod handler với comprehensive memory management"""
+    """Enhanced RunPod handler với FIXED context manager usage"""
     job_id = job.get("id", "unknown")
     start_time = time.time()
     
     try:
         job_input = job.get("input", {})
         
-        # Log initial memory state
         initial_mem = get_memory_stats()
         logger.info(f"🚀 Job {job_id} started - Initial memory: {initial_mem.get('allocated_gb', 0):.1f}GB")
         
-        # Validate input
         is_valid, validation_message = validate_input_parameters(job_input)
         if not is_valid:
             return {"error": validation_message, "status": "failed", "job_id": job_id}
         
-        # Extract parameters
         image_url = job_input["image_url"]
         audio_urls = job_input["audio_urls"]
         
@@ -1025,7 +893,7 @@ def handler(job):
             "cfg_scale": job_input.get("cfg_scale", 1.0),
             "scheduler": job_input.get("scheduler", "flowmatch_distill"),
             "mode": job_input.get("mode", "multitalk"),
-            "use_block_swap": job_input.get("use_block_swap", True),  # Default True
+            "use_block_swap": job_input.get("use_block_swap", True),
             "blocks_to_swap": job_input.get("blocks_to_swap", 20),
             "use_speed_lora": job_input.get("use_speed_lora", True),
             "speed_lora_strength": job_input.get("speed_lora_strength", 1.0),
@@ -1039,17 +907,18 @@ def handler(job):
         logger.info(f"⚙️ Resolution: {parameters['width']}x{parameters['height']} @ {parameters['fps']}fps")
         
         # Verify models
-        models_ok, missing_models = verify_models(parameters['mode'])
-        if not models_ok:
-            return {
-                "error": "Required models are missing",
-                "missing_models": missing_models,
-                "status": "failed",
-                "mode": parameters['mode']
-            }
+        with memory_safe_execution("Model Verification"):
+            models_ok, missing_models = verify_models(parameters['mode'])
+            if not models_ok:
+                return {
+                    "error": "Required models are missing",
+                    "missing_models": missing_models,
+                    "status": "failed",
+                    "mode": parameters['mode']
+                }
         
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Download files với memory monitoring
+            # Download files
             with memory_safe_execution("File Downloads"):
                 # Download image
                 image_path = os.path.join(temp_dir, "input_image.jpg")
@@ -1089,7 +958,7 @@ def handler(job):
                 if not valid_audio_paths:
                     return {"error": "No valid audio files could be downloaded"}
             
-            # Generate video với memory optimization
+            # Generate video
             generation_start = time.time()
             output_path = generate_video_wan21_memory_optimized(
                 image_path=image_path,
@@ -1103,7 +972,7 @@ def handler(job):
             
             # Upload result
             logger.info("📤 Uploading result...")
-            output_filename = f"wan21_memory_optimized_{parameters['mode']}_{job_id}_{uuid.uuid4().hex[:8]}.mp4"
+            output_filename = f"wan21_fixed_{parameters['mode']}_{job_id}_{uuid.uuid4().hex[:8]}.mp4"
             
             try:
                 output_url = upload_to_minio(output_path, output_filename)
@@ -1143,12 +1012,12 @@ def handler(job):
                     "block_swap": parameters["use_block_swap"],
                     "blocks_swapped": parameters["blocks_to_swap"],
                     "vae_tiling": parameters["use_vae_tiling"],
-                    "workflow_version": "WAN21_MEMORY_OPTIMIZED_v3.0"
+                    "workflow_version": "WAN21_CONTEXT_MANAGER_FIXED_v3.1"
                 },
                 "memory_info": {
                     "initial_memory_gb": round(initial_mem.get('allocated_gb', 0), 1),
                     "peak_memory_gb": round(final_mem.get('allocated_gb', 0), 1),
-                    "memory_efficiency": "optimized_for_40GB_GPU"
+                    "memory_efficiency": "context_manager_fixed"
                 },
                 "status": "completed"
             }
@@ -1158,7 +1027,6 @@ def handler(job):
         logger.error(f"❌ Handler error for job {job_id}: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         
-        # Emergency cleanup
         emergency_memory_cleanup(force_aggressive=True)
         
         return {
@@ -1169,42 +1037,45 @@ def handler(job):
             "debug_info": {
                 "attention_mechanisms": ATTENTION_MECHANISMS,
                 "memory_config": MEMORY_CONFIG,
-                "memory_stats": get_memory_stats()
+                "memory_stats": get_memory_stats(),
+                "fix_applied": "context_manager_correction"
             }
         }
     finally:
         emergency_memory_cleanup(force_aggressive=True)
 
 def health_check():
-    """Enhanced health check với memory monitoring"""
+    """Enhanced health check"""
     try:
-        # Check CUDA
         if not torch.cuda.is_available():
             return False, "CUDA not available"
         
-        # Check memory situation
         mem_stats = get_memory_stats()
         available_memory = mem_stats.get("free_gb", 0)
         
         if available_memory < 5:
             return False, f"Insufficient GPU memory: {available_memory:.1f}GB available"
         
-        # Check modules
         if not WANVIDEO_AVAILABLE:
             return False, "WanVideoWrapper not available"
         
-        # Check models
+        # Test context manager
+        try:
+            with memory_safe_execution("Health Check Test"):
+                pass
+            logger.info("✅ Context manager test passed")
+        except Exception as e:
+            return False, f"Context manager test failed: {e}"
+        
         multitalk_ok, _ = verify_models("multitalk")
         infinitetalk_ok, _ = verify_models("infinitetalk")
         
         if not (multitalk_ok or infinitetalk_ok):
             return False, "No complete model sets available"
         
-        # Check MinIO
         if not minio_client:
             return False, "MinIO not available"
         
-        # Available features
         available_modes = []
         if multitalk_ok:
             available_modes.append("multitalk")
@@ -1220,7 +1091,7 @@ def health_check():
             f"Ready - Modes: {', '.join(available_modes)}, "
             f"Memory: {available_memory:.1f}GB/{total_memory:.1f}GB available, "
             f"Attention: {optimal_attention} (available: {', '.join(attention_modes)}), "
-            f"Memory Optimized: v3.0"
+            f"Context Manager: FIXED v3.1"
         )
         
         return True, health_info
@@ -1229,7 +1100,7 @@ def health_check():
         return False, f"Health check failed: {str(e)}"
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting WAN2.1 Memory-Optimized Serverless Worker v3.0...")
+    logger.info("🚀 Starting WAN2.1 Memory-Optimized Serverless Worker v3.1 (Context Manager Fixed)...")
     logger.info(f"🔥 PyTorch: {torch.__version__}")
     logger.info(f"🎯 CUDA Available: {torch.cuda.is_available()}")
     
@@ -1238,17 +1109,14 @@ if __name__ == "__main__":
         logger.info(f"💾 GPU: {gpu_props.name}")
         logger.info(f"💾 GPU Memory: {gpu_props.total_memory / 1e9:.1f}GB")
         
-        # Log memory management settings
         mem_stats = get_memory_stats()
         logger.info(f"📊 Memory Management: {MEMORY_CONFIG['max_gpu_usage_percent']}% limit, {mem_stats.get('free_gb', 0):.1f}GB available")
     
-    # Log optimizations
     attention_modes = [name for name, available in ATTENTION_MECHANISMS.items() if available]
     logger.info(f"⚡ Available Attention: {attention_modes}")
     logger.info(f"🧹 Memory Optimizations: Enhanced cleanup, Block swap default, VAE tiling support")
     
     try:
-        # Health check
         health_ok, health_msg = health_check()
         if not health_ok:
             logger.error(f"❌ Health check failed: {health_msg}")
@@ -1256,9 +1124,8 @@ if __name__ == "__main__":
         
         logger.info(f"✅ Health check passed: {health_msg}")
         logger.info("🎬 Ready to process memory-optimized WAN2.1 requests...")
-        logger.info("🔧 Memory management: Aggressive cleanup, CUDA OOM prevention, Auto-optimization!")
+        logger.info("🔧 FIXED: Context manager implementation, Memory management, CUDA OOM prevention!")
         
-        # Start RunPod worker
         runpod.serverless.start({"handler": handler})
         
     except Exception as e:
