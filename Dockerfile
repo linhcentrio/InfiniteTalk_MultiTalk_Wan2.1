@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir -U \
 
 # Install FlashAttention từ wheel được build sẵn cho PyTorch 2.7
 RUN pip install --no-cache-dir \
-    https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+    https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 
 # Cài đặt SageAttention
 RUN echo "=== Installing SageAttention từ wheel ===" && \
@@ -213,6 +213,7 @@ EXPOSE 8000
 
 # Run với optimized memory
 CMD ["python", "-u", "/app/wan21_handler.py"]
+
 
 
 
