@@ -31,8 +31,13 @@ RUN pip install --no-cache-dir \
     https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 
 # Cài đặt SageAttention
-RUN pip install --no-cache-dir \
-    https://huggingface.co/MonsterMMORPG/SECourses_Premium_Flash_Attention/resolve/4b17732a84bc50cf1e8b790e854ee9cd5e2ebfbf/sageattention-2.1.1-cp310-cp310-linux_x86_64.whl
+RUN echo "=== Installing SageAttention từ wheel ===" && \
+    pip install --no-cache-dir \
+    https://huggingface.co/MonsterMMORPG/SECourses_Premium_Flash_Attention/resolve/4b17732a84bc50cf1e8b790e854ee9cd5e2ebfbf/sageattention-2.1.1-cp310-cp310-linux_x86_64.whl && \
+    echo "✅ SageAttention installed successfully"
+
+# Verify SageAttention installation
+RUN python -c "import sageattention; print(f'✅ SageAttention OK - {sageattention.__version__}')" || echo "❌ SageAttention verification failed"
 
 # Core ML/AI packages compatible với PyTorch 2.7.1
 RUN pip install --no-cache-dir \
@@ -208,6 +213,7 @@ EXPOSE 8000
 
 # Run với optimized memory
 CMD ["python", "-u", "/app/wan21_handler.py"]
+
 
 
 
